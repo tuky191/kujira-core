@@ -245,7 +245,7 @@ func QueryTxCmdServer() *cobra.Command {
 	return cmd
 }
 
-type notFoundError struct {
+type apiError struct {
 	Message string     `json:"message"`
 	Code    codes.Code `json:"code"`
 	Details []string   `json:"details"`
@@ -284,7 +284,7 @@ func queryTx(cmd *cobra.Command, args []string) error {
 		txResult, err := getTx(clientCtx, txHash)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
-				notFound := notFoundError{
+				notFound := apiError{
 					Message: fmt.Sprintf("tx not found: %s", txHash),
 					Code:    codes.NotFound,
 					Details: []string{err.Error()},
@@ -295,8 +295,17 @@ func queryTx(cmd *cobra.Command, args []string) error {
 				_, _ = w.Write(notFoundJSON)
 				return
 			}
-
+			rpcResponseError := apiError{
+				Message: fmt.Sprintf("unable to process %s", txHash),
+				Code:    codes.NotFound,
+				Details: []string{err.Error()},
+			}
+			rpcResponseErrorJSON, _ := json.Marshal(rpcResponseError)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write(rpcResponseErrorJSON)
 			return
+
 		}
 		if err := clientCtx.PrintProto(txResult); err != nil {
 			http.Error(w, "Failed to serialize response", http.StatusInternalServerError)
