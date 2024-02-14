@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	rosettaCmd "cosmossdk.io/tools/rosetta/cmd"
 	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
@@ -37,6 +39,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cast"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
 )
 
 // NewRootCmd creates a new root command for wasmd. It is called once in the
@@ -242,13 +245,19 @@ func QueryTxCmdServer() *cobra.Command {
 	return cmd
 }
 
+type notFoundError struct {
+	Message string     `json:"message"`
+	Code    codes.Code `json:"code"`
+	Details []string   `json:"details"`
+}
+
 func queryTx(cmd *cobra.Command, args []string) error {
-	clientCtx, err := client.GetClientQueryContext(cmd)
-	if err != nil {
-		return err
-	}
 
 	if len(args) > 0 {
+		clientCtx, err := client.GetClientQueryContext(cmd)
+		if err != nil {
+			return err
+		}
 		clientCtx.Output = os.Stdout
 
 		if args[0] == "" {
@@ -262,6 +271,11 @@ func queryTx(cmd *cobra.Command, args []string) error {
 	}
 	r := mux.NewRouter()
 	r.HandleFunc("/cosmos/tx/v1beta1/txs/{hash}", func(w http.ResponseWriter, r *http.Request) {
+		clientCtx, err := client.GetClientQueryContext(cmd)
+		if err != nil {
+			http.Error(w, "Failed to get client query context", http.StatusInternalServerError)
+			return
+		}
 		buffer := new(bytes.Buffer)
 		clientCtx.Output = buffer
 
@@ -269,7 +283,19 @@ func queryTx(cmd *cobra.Command, args []string) error {
 		txHash := vars["hash"]
 		txResult, err := getTx(clientCtx, txHash)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			if strings.Contains(err.Error(), "not found") {
+				notFound := notFoundError{
+					Message: fmt.Sprintf("tx not found: %s", txHash),
+					Code:    codes.NotFound,
+					Details: []string{err.Error()},
+				}
+				notFoundJSON, _ := json.Marshal(notFound)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write(notFoundJSON)
+				return
+			}
+
 			return
 		}
 		if err := clientCtx.PrintProto(txResult); err != nil {
